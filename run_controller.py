@@ -6,6 +6,7 @@ Script principal para ejecutar el TECMFS Controller Node
 import uvicorn
 import sys
 import os
+import argparse
 
 # Agregar el directorio raíz al path para importar módulos
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -22,12 +23,14 @@ def main():
     print("=" * 50)
     
     try:
-        uvicorn.run(
-            "controller.main:app",
-            host=HOST,
-            port=PORT,
-            reload=DEBUG
-        )
+        parser = argparse.ArgumentParser(description="Run the TECMFS Controller Node.")
+        parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to bind the server to.")
+        parser.add_argument("--port", type=int, default=8000, help="Port to run the server on.")
+        
+        args = parser.parse_args()
+
+        print(f"Starting TECMFS Controller on {args.host}:{args.port}")
+        uvicorn.run(app, host=args.host, port=args.port)
     except KeyboardInterrupt:
         print("\nServidor detenido por el usuario")
     except Exception as e:
