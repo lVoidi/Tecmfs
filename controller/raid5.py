@@ -17,6 +17,7 @@ class RAID5Manager:
         self.disk_nodes = {}  # {disk_id: DiskNodeInfo}
         self.file_metadata = {}  # {file_id: FileMetadata}
         self.metadata_file = "metadata.json"
+        self.next_stripe_number = 0 # Contador global de franjas para rotar la paridad
         
         # Configurar nodos de disco (esto se conectará con los Disk Nodes de la Persona 2)
         self._setup_disk_nodes()
@@ -48,6 +49,8 @@ class RAID5Manager:
                         file_id: FileMetadata(**metadata)
                         for file_id, metadata in loaded_files.items()
                     }
+                    # Cargar el contador global de franjas
+                    self.next_stripe_number = data.get('next_stripe_number', 0)
             except Exception as e:
                 print(f"Error cargando metadatos: {e}")
     
@@ -59,7 +62,12 @@ class RAID5Manager:
                     file_id: metadata.model_dump()
                     for file_id, metadata in self.file_metadata.items()
                 }
-                json.dump({'files': metadata_to_save}, f, indent=2)
+                # Guardar archivos y el contador de franjas
+                full_metadata = {
+                    'files': metadata_to_save,
+                    'next_stripe_number': self.next_stripe_number
+                }
+                json.dump(full_metadata, f, indent=2)
         except Exception as e:
             print(f"Error guardando metadatos: {e}")
     
@@ -118,9 +126,13 @@ class RAID5Manager:
         parity_locations = {}
 
         for i, stripe_data in enumerate(stripes):
-            data_blocks, parity_block = self._distribute_blocks(stripe_data, i)
+            # Usar y luego incrementar el contador global para determinar el disco de paridad
+            current_stripe_num = self.next_stripe_number
+            self.next_stripe_number += 1
+
+            data_blocks, parity_block = self._distribute_blocks(stripe_data, current_stripe_num)
             
-            parity_disk_index = self._get_parity_disk(i)
+            parity_disk_index = self._get_parity_disk(current_stripe_num)
             data_disk_indices = [j for j in range(self.num_disks) if j != parity_disk_index]
             
             # Distribuir y almacenar bloques de datos
@@ -249,9 +261,13 @@ class RAID5Manager:
         for block_id, disk_id in all_stripe_blocks.items():
             try:
                 # Extraer el índice de la franja del ID del bloque
-                # e.g., ..._block_0_1 -> stripe 0; ..._block_parity_0 -> stripe 0
                 parts = block_id.split('_')
-                stripe_index = int(parts[-2] if 'parity' not in parts[-1] else parts[-1])
+                # Lógica corregida para parsear el ID del bloque de paridad
+                if parts[-2] == 'parity':
+                    stripe_index = int(parts[-1])
+                else:
+                    stripe_index = int(parts[-2])
+                
                 if stripe_index not in stripes:
                     stripes[stripe_index] = {}
                 stripes[stripe_index][block_id] = disk_id
@@ -259,16 +275,16 @@ class RAID5Manager:
                 print(f"Advertencia: No se pudo determinar la franja para el bloque {block_id}")
 
         # Intentar reconstruir cada bloque fallido
-        for failed_block_id in failed_blocks.keys():
+        for failed_block_id in list(failed_blocks.keys()): # Usar list para poder modificar el dict
+            # Lógica de parseo corregida
             parts = failed_block_id.split('_')
-            stripe_index = int(parts[-2])
-            
+            if parts[-2] == 'parity':
+                stripe_index = int(parts[-1])
+            else:
+                stripe_index = int(parts[-2])
+
             stripe = stripes.get(stripe_index, {})
             
-            # Verificar si más de un bloque ha fallado en esta franja
-            if sum(1 for b_id in stripe if b_id not in retrieved_blocks and b_id != failed_block_id) > 0:
-                raise Exception(f"Fallo de más de un disco en la franja {stripe_index}. No se puede reconstruir.")
-
             # Reunir todos los bloques existentes de la franja (datos y paridad)
             blocks_for_xor = []
             for sibling_block_id, sibling_disk_id in stripe.items():
@@ -287,6 +303,8 @@ class RAID5Manager:
             # La magia del XOR: A^B^P = C
             reconstructed_block = self._calculate_parity(blocks_for_xor)
             reconstructed_blocks[failed_block_id] = reconstructed_block
+            # Quitar de la lista de fallidos porque ya lo reconstruimos
+            del failed_blocks[failed_block_id] 
             print(f"Bloque {failed_block_id} reconstruido exitosamente.")
 
         return reconstructed_blocks
@@ -339,8 +357,38 @@ class RAID5Manager:
         
         return results
     
+    def get_all_blocks_status(self) -> List[Dict]:
+        """Recopila y devuelve el estado de todos los bloques de todos los archivos."""
+        status_list = []
+        for file_id, metadata in self.file_metadata.items():
+            blocks = []
+            # Bloques de datos
+            for block_id, disk_id in metadata.blocks.items():
+                blocks.append({
+                    "block_id": block_id,
+                    "disk_id": disk_id,
+                    "type": "data"
+                })
+            # Bloques de paridad
+            for block_id, disk_id in metadata.parity_blocks.items():
+                blocks.append({
+                    "block_id": block_id,
+                    "disk_id": disk_id,
+                    "type": "parity"
+                })
+            
+            file_status = {
+                "file_id": file_id,
+                "filename": metadata.filename,
+                "blocks": sorted(blocks, key=lambda x: x['block_id']) # Ordenar para consistencia
+            }
+            status_list.append(file_status)
+            
+        return sorted(status_list, key=lambda x: x['filename']) # Ordenar por nombre de archivo
+    
     def get_system_status(self) -> SystemStatus:
-        """Obtener el estado del sistema RAID 5"""
+        """Obtener el estado general del sistema RAID 5."""
+        # Ping a cada nodo para obtener estado actualizado
         total_disks = len(self.disk_nodes)
         available_disks = sum(1 for disk in self.disk_nodes.values() if disk.status == "online")
         failed_disks = total_disks - available_disks

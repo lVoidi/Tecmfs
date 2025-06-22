@@ -36,7 +36,7 @@ def download_file(file_id: str, filename: str, save_dir: str) -> Optional[str]:
     """Downloads a file from the controller and saves it."""
     save_path = os.path.join(save_dir, filename)
     try:
-        with requests.get(f"{CONTROLLER_URL}/download/{file_id}", stream=True, timeout=30) as r:
+        with requests.get(f"{CONTROLLER_URL}/download/{file_id}", stream=True, timeout=300) as r:
             r.raise_for_status()
             with open(save_path, 'wb') as f:
                 for chunk in r.iter_content(chunk_size=8192):
@@ -76,6 +76,16 @@ def get_system_status() -> Optional[Dict]:
         return response.json()
     except requests.RequestException as e:
         print(f"Error getting system status: {e}")
+        return None
+
+def get_block_status() -> Optional[List[Dict]]:
+    """Gets the detailed block status for all files from the controller."""
+    try:
+        response = requests.get(f"{CONTROLLER_URL}/status/blocks", timeout=10)
+        response.raise_for_status()
+        return response.json()
+    except requests.RequestException as e:
+        print(f"Error getting block status: {e}")
         return None
 
 if __name__ == '__main__':

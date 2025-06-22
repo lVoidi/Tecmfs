@@ -50,6 +50,7 @@ class App(tk.Tk):
         ttk.Button(button_frame, text="Upload File", command=self.upload_file).pack(pady=5, fill="x")
         ttk.Button(button_frame, text="Download File", command=self.download_file).pack(pady=5, fill="x")
         ttk.Button(button_frame, text="Delete File", command=self.delete_file).pack(pady=15, fill="x")
+        ttk.Button(button_frame, text="Block Status", command=self.show_block_status).pack(side="bottom", pady=10, fill="x")
 
         # --- Status Bar ---
         self.status_var = tk.StringVar()
@@ -161,6 +162,41 @@ class App(tk.Tk):
             self.refresh_file_list()
         else:
             self.set_status(f"Failed to delete {filename}.", is_error=True)
+
+    def show_block_status(self):
+        self.set_status("Fetching block status...")
+        status_data = api_client.get_block_status()
+
+        if status_data is None:
+            self.set_status("Failed to fetch block status.", is_error=True)
+            return
+
+        # Create a new top-level window
+        status_window = tk.Toplevel(self)
+        status_window.title("TECMFS Block Status")
+        status_window.geometry("700x500")
+
+        # Create a Treeview
+        tree = ttk.Treeview(status_window, columns=("Disk", "Type"), show="tree headings")
+        tree.heading("#0", text="File / Block ID")
+        tree.heading("Disk", text="Disk ID")
+        tree.heading("Type", text="Block Type")
+        tree.column("#0", width=400)
+        tree.column("Disk", width=100, anchor="center")
+        tree.column("Type", width=100, anchor="center")
+
+        # Populate the Treeview with data
+        for file_info in status_data:
+            # Parent node for the file
+            file_node = tree.insert("", "end", text=file_info['filename'], open=True)
+            
+            # Child nodes for each block
+            for block_info in file_info['blocks']:
+                tree.insert(file_node, "end", text=f"  - {block_info['block_id']}", 
+                            values=(block_info['disk_id'], block_info['type']))
+        
+        tree.pack(fill="both", expand=True, padx=10, pady=10)
+        self.set_status("Block status loaded successfully.")
 
 if __name__ == "__main__":
     app = App()

@@ -44,4 +44,14 @@ class DiskNodeInfo(BaseModel):
     status: str  # "online", "offline", "failed"
     total_space: int
     used_space: int
-    available_space: int 
+    available_space: int
+
+class BlockStatus(BaseModel):
+    block_id: str
+    disk_id: str
+    type: str  # 'data' o 'parity'
+
+class FileBlockStatus(BaseModel):
+    file_id: str
+    filename: str
+    blocks: List[BlockStatus] 

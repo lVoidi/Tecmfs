@@ -7,7 +7,7 @@ import json
 from datetime import datetime
 
 from .raid5 import RAID5Manager
-from .schemas import FileMetadata, SystemStatus, FileUploadResponse
+from .schemas import FileMetadata, SystemStatus, FileUploadResponse, FileBlockStatus
 
 app = FastAPI(title="TECMFS Controller", version="1.0.0")
 
@@ -27,6 +27,15 @@ async def get_system_status():
         return status
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error obteniendo estado: {str(e)}")
+
+@app.get("/status/blocks", response_model=List[FileBlockStatus])
+async def get_block_status():
+    """Obtener el estado detallado de todos los bloques de todos los archivos."""
+    try:
+        block_details = raid_manager.get_all_blocks_status()
+        return block_details
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error obteniendo estado de los bloques: {str(e)}")
 
 @app.post("/upload", response_model=FileUploadResponse)
 async def upload_file(file: UploadFile = File(...)):
