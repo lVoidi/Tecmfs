@@ -178,23 +178,34 @@ class RAID5Manager:
         
         metadata = self.file_metadata[file_id]
         
-        # Recuperar bloques de datos
-        content_blocks = {}
+        # 1. Intentar recuperar todos los bloques de datos
+        retrieved_blocks: Dict[str, bytes] = {}
+        failed_blocks: Dict[str, str] = {} # {block_id: disk_id}
+        
         for block_id, disk_id in metadata.blocks.items():
             block_data = self._retrieve_block_from_disk(block_id, disk_id)
-            if block_data:
-                content_blocks[block_id] = block_data
+            if block_data is not None:
+                retrieved_blocks[block_id] = block_data
+            else:
+                failed_blocks[block_id] = disk_id
         
-        # Si faltan bloques, intentar reconstruir usando paridad
-        if len(content_blocks) < len(metadata.blocks):
-            # TODO: Implementar la reconstrucción de datos
-            print("Faltan bloques, se necesita reconstrucción (no implementado)")
-            # data_blocks = self._reconstruct_data(metadata)
-            raise HTTPException(status_code=500, detail="Fallo de disco y la reconstrucción no está implementada.")
+        # 2. Si faltan bloques, iniciar la reconstrucción
+        if failed_blocks:
+            print(f"Faltan {len(failed_blocks)} bloques. Iniciando reconstrucción...")
+            try:
+                reconstructed_data = self._reconstruct_data(metadata, failed_blocks, retrieved_blocks)
+                retrieved_blocks.update(reconstructed_data)
+            except Exception as e:
+                print(f"Error durante la reconstrucción: {e}")
+                raise HTTPException(status_code=500, detail=f"No se pudo reconstruir el archivo: {e}")
 
-        # Reconstruir archivo original en orden
+        # 3. Reconstruir el archivo original en orden
+        # Asegurarse de que todos los bloques de datos están presentes después de la reconstrucción
+        if len(retrieved_blocks) < len(metadata.blocks):
+             raise HTTPException(status_code=500, detail="Fallo irrecuperable de disco, no se puede reconstruir el archivo.")
+
         sorted_block_ids = sorted(metadata.blocks.keys())
-        full_content = b''.join(content_blocks[block_id] for block_id in sorted_block_ids)
+        full_content = b''.join(retrieved_blocks[block_id] for block_id in sorted_block_ids)
         
         # Remover padding
         original_size = metadata.size
@@ -228,11 +239,57 @@ class RAID5Manager:
         
         return None
     
-    def _reconstruct_data(self, metadata: FileMetadata) -> List[bytes]:
-        """Reconstruir datos usando bloques de paridad"""
-        # Implementación de reconstrucción RAID 5
-        # Por ahora retornamos datos simulados
-        return [b'data_reconstructed'] * len(metadata.blocks)
+    def _reconstruct_data(self, metadata: FileMetadata, failed_blocks: Dict[str, str], retrieved_blocks: Dict[str, bytes]) -> Dict[str, bytes]:
+        """Reconstruir datos usando bloques de paridad."""
+        reconstructed_blocks = {}
+        all_stripe_blocks = metadata.blocks | metadata.parity_blocks
+
+        # Organizar bloques por franja (stripe)
+        stripes: Dict[int, Dict[str, str]] = {}
+        for block_id, disk_id in all_stripe_blocks.items():
+            try:
+                # Extraer el índice de la franja del ID del bloque
+                # e.g., ..._block_0_1 -> stripe 0; ..._block_parity_0 -> stripe 0
+                parts = block_id.split('_')
+                stripe_index = int(parts[-2] if 'parity' not in parts[-1] else parts[-1])
+                if stripe_index not in stripes:
+                    stripes[stripe_index] = {}
+                stripes[stripe_index][block_id] = disk_id
+            except (IndexError, ValueError):
+                print(f"Advertencia: No se pudo determinar la franja para el bloque {block_id}")
+
+        # Intentar reconstruir cada bloque fallido
+        for failed_block_id in failed_blocks.keys():
+            parts = failed_block_id.split('_')
+            stripe_index = int(parts[-2])
+            
+            stripe = stripes.get(stripe_index, {})
+            
+            # Verificar si más de un bloque ha fallado en esta franja
+            if sum(1 for b_id in stripe if b_id not in retrieved_blocks and b_id != failed_block_id) > 0:
+                raise Exception(f"Fallo de más de un disco en la franja {stripe_index}. No se puede reconstruir.")
+
+            # Reunir todos los bloques existentes de la franja (datos y paridad)
+            blocks_for_xor = []
+            for sibling_block_id, sibling_disk_id in stripe.items():
+                if sibling_block_id != failed_block_id:
+                    # Si ya lo tenemos, usarlo. Si no, recuperarlo.
+                    block_data = retrieved_blocks.get(sibling_block_id)
+                    if not block_data:
+                        block_data = self._retrieve_block_from_disk(sibling_block_id, sibling_disk_id)
+                    
+                    if block_data is None:
+                        # Esto indica un segundo fallo en la misma franja
+                        raise Exception(f"Fallo de disco múltiple irrecuperable en la franja {stripe_index}.")
+                    
+                    blocks_for_xor.append(block_data)
+            
+            # La magia del XOR: A^B^P = C
+            reconstructed_block = self._calculate_parity(blocks_for_xor)
+            reconstructed_blocks[failed_block_id] = reconstructed_block
+            print(f"Bloque {failed_block_id} reconstruido exitosamente.")
+
+        return reconstructed_blocks
     
     def delete_file(self, file_id: str) -> bool:
         """Eliminar un archivo del sistema"""

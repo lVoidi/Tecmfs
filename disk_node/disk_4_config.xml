@@ -1,0 +1,15 @@
+<config>
+    <!-- Configuración del servidor del nodo de disco -->
+    <server>
+        <port>8004</port>
+    </server>
+
+    <!-- Configuración del almacenamiento -->
+    <storage>
+        <!-- Ruta donde se guardarán los bloques de datos -->
+        <path>./disk_storage/disk_4</path>
+        
+        <!-- Capacidad máxima del disco en Megabytes (MB) -->
+        <capacity_mb>1024</capacity_mb>
+    </storage>
+</config> 
