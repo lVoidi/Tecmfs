@@ -43,7 +43,11 @@ class RAID5Manager:
             try:
                 with open(self.metadata_file, 'r') as f:
                     data = json.load(f)
-                    self.file_metadata = data.get('files', {})
+                    loaded_files = data.get('files', {})
+                    self.file_metadata = {
+                        file_id: FileMetadata(**metadata)
+                        for file_id, metadata in loaded_files.items()
+                    }
             except Exception as e:
                 print(f"Error cargando metadatos: {e}")
     
@@ -51,7 +55,11 @@ class RAID5Manager:
         """Guardar metadatos a archivo"""
         try:
             with open(self.metadata_file, 'w') as f:
-                json.dump({'files': self.file_metadata}, f, indent=2)
+                metadata_to_save = {
+                    file_id: metadata.model_dump()
+                    for file_id, metadata in self.file_metadata.items()
+                }
+                json.dump({'files': metadata_to_save}, f, indent=2)
         except Exception as e:
             print(f"Error guardando metadatos: {e}")
     
@@ -101,46 +109,43 @@ class RAID5Manager:
     
     def store_file(self, filename: str, content: bytes) -> str:
         """Almacenar un archivo usando RAID 5"""
-        # Generar ID único para el archivo
         file_id = str(uuid.uuid4())
         
-        # Dividir datos en bloques y calcular paridad
-        data_blocks, parity_block = self._distribute_blocks(content, 0)
+        # Dividir datos en franjas (stripes) y bloques
+        stripes = [content[i:i+self.block_size * (self.num_disks - 1)] for i in range(0, len(content), self.block_size * (self.num_disks - 1))]
         
-        # Distribuir bloques entre discos
-        block_ids = []
-        parity_block_ids = []
-        
-        for i, block in enumerate(data_blocks):
-            # Determinar disco para este bloque
-            parity_disk = self._get_parity_disk(i)
-            data_disks = [j for j in range(self.num_disks) if j != parity_disk]
+        block_locations = {}
+        parity_locations = {}
+
+        for i, stripe_data in enumerate(stripes):
+            data_blocks, parity_block = self._distribute_blocks(stripe_data, i)
             
-            # Distribuir bloques de datos
-            for j, data_block in enumerate(data_blocks):
-                disk_index = data_disks[j % len(data_disks)]
+            parity_disk_index = self._get_parity_disk(i)
+            data_disk_indices = [j for j in range(self.num_disks) if j != parity_disk_index]
+            
+            # Distribuir y almacenar bloques de datos
+            for j, block_data in enumerate(data_blocks):
+                disk_index = data_disk_indices[j]
                 disk_id = f"disk_{disk_index + 1}"
-                block_id = self._get_block_id(file_id, str(j))
+                block_id = self._get_block_id(file_id, f"{i}_{j}")
                 
-                # Aquí se enviaría el bloque al Disk Node correspondiente
-                # Por ahora, simulamos el almacenamiento
-                self._store_block_to_disk(disk_id, block_id, data_block)
-                block_ids.append(block_id)
-            
+                self._store_block_to_disk(disk_id, block_id, block_data)
+                block_locations[block_id] = disk_id
+
             # Almacenar bloque de paridad
+            parity_disk_id = f"disk_{parity_disk_index + 1}"
             parity_block_id = self._get_block_id(file_id, f"parity_{i}")
-            parity_disk_id = f"disk_{parity_disk + 1}"
             self._store_block_to_disk(parity_disk_id, parity_block_id, parity_block)
-            parity_block_ids.append(parity_block_id)
-        
+            parity_locations[parity_block_id] = parity_disk_id
+
         # Crear metadatos del archivo
         file_metadata = FileMetadata(
             file_id=file_id,
             filename=filename,
             size=len(content),
             uploaded_at=datetime.now().isoformat(),
-            blocks=block_ids,
-            parity_blocks=parity_block_ids
+            blocks=block_locations,
+            parity_blocks=parity_locations
         )
         
         # Guardar metadatos
@@ -150,22 +155,22 @@ class RAID5Manager:
         return file_id
     
     def _store_block_to_disk(self, disk_id: str, block_id: str, data: bytes):
-        """Almacenar un bloque en un disco específico"""
-        # Por ahora simulamos el almacenamiento
-        # En la implementación real, esto haría una llamada HTTP al Disk Node
-        print(f"Almacenando bloque {block_id} en disco {disk_id}")
-        
-        # Simular llamada HTTP al Disk Node
+        """Almacenar un bloque en un disco específico haciendo una llamada HTTP."""
+        disk_info = self.disk_nodes.get(disk_id)
+        if not disk_info or disk_info.status != "online":
+            print(f"Error: Disco {disk_id} no está disponible.")
+            return
+
         try:
-            disk_info = self.disk_nodes.get(disk_id)
-            if disk_info and disk_info.status == "online":
-                # Aquí iría la llamada real al Disk Node
-                # response = requests.post(f"{disk_info.url}/store", 
-                #                         json={"block_id": block_id, "data": data.hex()})
-                pass
-        except Exception as e:
-            print(f"Error almacenando en disco {disk_id}: {e}")
-    
+            payload = {"block_id": block_id, "data": data.hex()}
+            response = requests.post(f"{disk_info.url}/store", json=payload, timeout=5)
+            response.raise_for_status()  # Lanza una excepción para errores HTTP (4xx o 5xx)
+            print(f"Bloque {block_id} almacenado exitosamente en {disk_id}.")
+        except requests.exceptions.RequestException as e:
+            print(f"Error almacenando bloque {block_id} en disco {disk_id}: {e}")
+            # Marcar el disco como offline si falla la conexión
+            self.disk_nodes[disk_id].status = "offline"
+
     def retrieve_file(self, file_id: str) -> Optional[Dict]:
         """Recuperar un archivo del sistema RAID 5"""
         if file_id not in self.file_metadata:
@@ -174,36 +179,54 @@ class RAID5Manager:
         metadata = self.file_metadata[file_id]
         
         # Recuperar bloques de datos
-        data_blocks = []
-        for block_id in metadata.blocks:
-            block_data = self._retrieve_block_from_disk(block_id)
+        content_blocks = {}
+        for block_id, disk_id in metadata.blocks.items():
+            block_data = self._retrieve_block_from_disk(block_id, disk_id)
             if block_data:
-                data_blocks.append(block_data)
+                content_blocks[block_id] = block_data
         
         # Si faltan bloques, intentar reconstruir usando paridad
-        if len(data_blocks) < len(metadata.blocks):
-            data_blocks = self._reconstruct_data(metadata)
+        if len(content_blocks) < len(metadata.blocks):
+            # TODO: Implementar la reconstrucción de datos
+            print("Faltan bloques, se necesita reconstrucción (no implementado)")
+            # data_blocks = self._reconstruct_data(metadata)
+            raise HTTPException(status_code=500, detail="Fallo de disco y la reconstrucción no está implementada.")
+
+        # Reconstruir archivo original en orden
+        sorted_block_ids = sorted(metadata.blocks.keys())
+        full_content = b''.join(content_blocks[block_id] for block_id in sorted_block_ids)
         
-        # Reconstruir archivo original
-        if data_blocks:
-            content = b''.join(data_blocks)
-            # Remover padding del último bloque
-            content = content.rstrip(b'\x00')
-            
-            return {
-                'filename': metadata.filename,
-                'content': content,
-                'size': metadata.size
-            }
+        # Remover padding
+        original_size = metadata.size
+        full_content = full_content[:original_size]
+
+        return {
+            'filename': metadata.filename,
+            'content': full_content,
+        }
+    
+    def _retrieve_block_from_disk(self, block_id: str, disk_id: str) -> Optional[bytes]:
+        """Recuperar un bloque de un disco específico."""
+        disk_info = self.disk_nodes.get(disk_id)
+        if not disk_info or disk_info.status != "online":
+            print(f"Error: Disco {disk_id} no está disponible para leer el bloque {block_id}.")
+            # Marcar como offline si no lo estaba ya
+            if disk_info: self.disk_nodes[disk_id].status = "offline"
+            return None
+
+        try:
+            response = requests.get(f"{disk_info.url}/retrieve/{block_id}", timeout=5)
+            if response.status_code == 200:
+                hex_data = response.json().get("data")
+                return bytes.fromhex(hex_data)
+            elif response.status_code == 404:
+                print(f"Error: Bloque {block_id} no encontrado en disco {disk_id} donde debería estar.")
+                return None
+        except requests.exceptions.RequestException as e:
+            print(f"Error recuperando bloque {block_id} de {disk_id}: {e}")
+            self.disk_nodes[disk_id].status = "offline"
         
         return None
-    
-    def _retrieve_block_from_disk(self, block_id: str) -> Optional[bytes]:
-        """Recuperar un bloque de un disco"""
-        # Simular recuperación de bloque
-        # En la implementación real, esto haría una llamada HTTP al Disk Node
-        print(f"Recuperando bloque {block_id}")
-        return b'data_simulated'  # Datos simulados
     
     def _reconstruct_data(self, metadata: FileMetadata) -> List[bytes]:
         """Reconstruir datos usando bloques de paridad"""
@@ -218,9 +241,10 @@ class RAID5Manager:
         
         metadata = self.file_metadata[file_id]
         
-        # Eliminar bloques de datos
-        for block_id in metadata.blocks + metadata.parity_blocks:
-            self._delete_block_from_disk(block_id)
+        # Eliminar bloques de datos y paridad
+        all_blocks = metadata.blocks | metadata.parity_blocks
+        for block_id, disk_id in all_blocks.items():
+            self._delete_block_from_disk(block_id, disk_id)
         
         # Eliminar metadatos
         del self.file_metadata[file_id]
@@ -228,10 +252,20 @@ class RAID5Manager:
         
         return True
     
-    def _delete_block_from_disk(self, block_id: str):
-        """Eliminar un bloque de un disco"""
-        # Simular eliminación de bloque
-        print(f"Eliminando bloque {block_id}")
+    def _delete_block_from_disk(self, block_id: str, disk_id: str):
+        """Eliminar un bloque de un disco específico."""
+        disk_info = self.disk_nodes.get(disk_id)
+        if not disk_info or disk_info.status != "online":
+            print(f"Info: Disco {disk_id} ya no está disponible para borrar el bloque {block_id}.")
+            return
+
+        try:
+            response = requests.delete(f"{disk_info.url}/delete/{block_id}", timeout=5)
+            if response.status_code not in [200, 404]:
+                response.raise_for_status()
+        except requests.exceptions.RequestException as e:
+            print(f"Error eliminando bloque {block_id} de {disk_id}: {e}")
+            self.disk_nodes[disk_id].status = "offline"
     
     def list_files(self) -> List[FileMetadata]:
         """Listar todos los archivos almacenados"""

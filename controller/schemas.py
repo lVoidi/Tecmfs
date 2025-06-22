@@ -8,8 +8,8 @@ class FileMetadata(BaseModel):
     filename: str
     size: int
     uploaded_at: str
-    blocks: List[str]  # IDs de los bloques donde está almacenado
-    parity_blocks: List[str]  # IDs de los bloques de paridad
+    blocks: Dict[str, str]  # Mapeo de block_id a disk_id
+    parity_blocks: Dict[str, str]  # Mapeo de parity_block_id a disk_id
 
 class SystemStatus(BaseModel):
     """Modelo para el estado del sistema RAID 5"""

@@ -15,10 +15,10 @@ from controller.config.settings import HOST, PORT, DEBUG
 
 def main():
     """Función principal para ejecutar el servidor"""
-    print("🚀 Iniciando TECMFS Controller Node...")
-    print(f"📍 Servidor en: http://{HOST}:{PORT}")
-    print(f"🔧 Modo debug: {DEBUG}")
-    print("📚 Documentación API: http://localhost:8000/docs")
+    print("Iniciando TECMFS Controller Node...")
+    print(f"Servidor en: http://{HOST}:{PORT}")
+    print(f"Modo debug: {DEBUG}")
+    print("Documentación API: http://localhost:8000/docs")
     print("=" * 50)
     
     try:
@@ -29,9 +29,9 @@ def main():
             reload=DEBUG
         )
     except KeyboardInterrupt:
-        print("\n🛑 Servidor detenido por el usuario")
+        print("\nServidor detenido por el usuario")
     except Exception as e:
-        print(f"❌ Error iniciando servidor: {e}")
+        print(f"Error iniciando servidor: {e}")
         sys.exit(1)
 
 if __name__ == "__main__":
